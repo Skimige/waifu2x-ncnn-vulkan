@@ -100,19 +100,19 @@ static std::vector<int> parse_optarg_int_array(const char* optarg)
 
 static void print_usage()
 {
-    fprintf(stderr, "Usage: waifu2x-ncnn-vulkan -i infile -o outfile [options]...\n\n");
-    fprintf(stderr, "  -h                   show this help\n");
-    fprintf(stderr, "  -v                   verbose output\n");
-    fprintf(stderr, "  -i input-path        input image path (jpg/png/webp) or directory\n");
-    fprintf(stderr, "  -o output-path       output image path (png/webp) or directory\n");
-    fprintf(stderr, "  -n noise-level       denoise level (-1/0/1/2/3, default=0)\n");
-    fprintf(stderr, "  -s scale             upscale ratio (1/2, default=2)\n");
-    fprintf(stderr, "  -t tile-size         tile size (>=32/0=auto, default=0) can be 0,0,0 for multi-gpu\n");
-    fprintf(stderr, "  -m model-path        waifu2x model path (default=models-cunet)\n");
-    fprintf(stderr, "  -g gpu-id            gpu device to use (default=auto) can be 0,1,2 for multi-gpu\n");
-    fprintf(stderr, "  -j load:proc:save    thread count for load/proc/save (default=1:2:2) can be 1:2,2,2:2 for multi-gpu\n");
-    fprintf(stderr, "  -x                   enable tta mode\n");
-    fprintf(stderr, "  -f format            output image format (png/webp, default=ext/png)\n");
+    fprintf(stdout, "Usage: waifu2x-ncnn-vulkan -i infile -o outfile [options]...\n\n");
+    fprintf(stdout, "  -h                   show this help\n");
+    fprintf(stdout, "  -v                   verbose output\n");
+    fprintf(stdout, "  -i input-path        input image path (jpg/png/webp) or directory\n");
+    fprintf(stdout, "  -o output-path       output image path (jpg/png/webp) or directory\n");
+    fprintf(stdout, "  -n noise-level       denoise level (-1/0/1/2/3, default=0)\n");
+    fprintf(stdout, "  -s scale             upscale ratio (1/2, default=2)\n");
+    fprintf(stdout, "  -t tile-size         tile size (>=32/0=auto, default=0) can be 0,0,0 for multi-gpu\n");
+    fprintf(stdout, "  -m model-path        waifu2x model path (default=models-cunet)\n");
+    fprintf(stdout, "  -g gpu-id            gpu device to use (default=auto) can be 0,1,2 for multi-gpu\n");
+    fprintf(stdout, "  -j load:proc:save    thread count for load/proc/save (default=1:2:2) can be 1:2,2,2:2 for multi-gpu\n");
+    fprintf(stdout, "  -x                   enable tta mode\n");
+    fprintf(stdout, "  -f format            output image format (jpg/png/webp, default=ext/png)\n");
 }
 
 class Task
@@ -194,7 +194,7 @@ void* load(void* args)
     const int count = ltp->input_files.size();
     const int scale = ltp->scale;
 
-    #pragma omp parallel for num_threads(ltp->jobs_load)
+    #pragma omp parallel for schedule(static,1) num_threads(ltp->jobs_load)
     for (int i=0; i<count; i++)
     {
         const path_t& imagepath = ltp->input_files[i];
@@ -250,12 +250,14 @@ void* load(void* args)
                             // grayscale -> rgb
                             stbi_image_free(pixeldata);
                             pixeldata = stbi_load_from_memory(filedata, length, &w, &h, &c, 3);
+                            c = 3;
                         }
                         else if (c == 2)
                         {
                             // grayscale + alpha -> rgba
                             stbi_image_free(pixeldata);
                             pixeldata = stbi_load_from_memory(filedata, length, &w, &h, &c, 4);
+                            c = 4;
                         }
                     }
 #endif // _WIN32
@@ -274,6 +276,18 @@ void* load(void* args)
 
             v.inimage = ncnn::Mat(w, h, (void*)pixeldata, (size_t)c, c);
             v.outimage = ncnn::Mat(w * scale, h * scale, (size_t)c, c);
+
+            path_t ext = get_file_extension(v.outpath);
+            if (c == 4 && (ext == PATHSTR("jpg") || ext == PATHSTR("JPG") || ext == PATHSTR("jpeg") || ext == PATHSTR("JPEG")))
+            {
+                path_t output_filename2 = ltp->output_files[i] + PATHSTR(".png");
+                v.outpath = output_filename2;
+#if _WIN32
+                fwprintf(stderr, L"image %ls has alpha channel ! %ls will output %ls\n", imagepath.c_str(), imagepath.c_str(), output_filename2.c_str());
+#else // _WIN32
+                fprintf(stderr, "image %s has alpha channel ! %s will output %s\n", imagepath.c_str(), imagepath.c_str(), output_filename2.c_str());
+#endif // _WIN32
+            }
 
             toproc.put(v);
         }
@@ -371,14 +385,22 @@ void* save(void* args)
             success = stbi_write_png(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data, 0);
 #endif
         }
+        else if (ext == PATHSTR("jpg") || ext == PATHSTR("JPG") || ext == PATHSTR("jpeg") || ext == PATHSTR("JPEG"))
+        {
+#if _WIN32
+            success = wic_encode_jpeg_image(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data);
+#else
+            success = stbi_write_jpg(v.outpath.c_str(), v.outimage.w, v.outimage.h, v.outimage.elempack, v.outimage.data, 100);
+#endif
+        }
         if (success)
         {
             if (verbose)
             {
 #if _WIN32
-                fwprintf(stderr, L"%ls -> %ls done\n", v.inpath.c_str(), v.outpath.c_str());
+                fwprintf(stdout, L"%ls -> %ls done\n", v.inpath.c_str(), v.outpath.c_str());
 #else
-                fprintf(stderr, "%s -> %s done\n", v.inpath.c_str(), v.outpath.c_str());
+                fprintf(stdout, "%s -> %s done\n", v.inpath.c_str(), v.outpath.c_str());
 #endif
             }
         }
@@ -578,6 +600,10 @@ int main(int argc, char** argv)
         {
             format = PATHSTR("webp");
         }
+        else if (ext == PATHSTR("jpg") || ext == PATHSTR("JPG") || ext == PATHSTR("jpeg") || ext == PATHSTR("JPEG"))
+        {
+            format = PATHSTR("jpg");
+        }
         else
         {
             fprintf(stderr, "invalid outputpath extension type\n");
@@ -585,7 +611,7 @@ int main(int argc, char** argv)
         }
     }
 
-    if (format != PATHSTR("png") && format != PATHSTR("webp"))
+    if (format != PATHSTR("png") && format != PATHSTR("webp") && format != PATHSTR("jpg"))
     {
         fprintf(stderr, "invalid format argument\n");
         return -1;
@@ -605,10 +631,34 @@ int main(int argc, char** argv)
             const int count = filenames.size();
             input_files.resize(count);
             output_files.resize(count);
+
+            path_t last_filename;
+            path_t last_filename_noext;
             for (int i=0; i<count; i++)
             {
-                input_files[i] = inputpath + PATHSTR('/') + filenames[i];
-                output_files[i] = outputpath + PATHSTR('/') + filenames[i] + PATHSTR('.') + format;
+                path_t filename = filenames[i];
+                path_t filename_noext = get_file_name_without_extension(filename);
+                path_t output_filename = filename_noext + PATHSTR('.') + format;
+
+                // filename list is sorted, check if output image path conflicts
+                if (filename_noext == last_filename_noext)
+                {
+                    path_t output_filename2 = filename + PATHSTR('.') + format;
+#if _WIN32
+                    fwprintf(stderr, L"both %ls and %ls output %ls ! %ls will output %ls\n", filename.c_str(), last_filename.c_str(), output_filename.c_str(), filename.c_str(), output_filename2.c_str());
+#else
+                    fprintf(stderr, "both %s and %s output %s ! %s will output %s\n", filename.c_str(), last_filename.c_str(), output_filename.c_str(), filename.c_str(), output_filename2.c_str());
+#endif
+                    output_filename = output_filename2;
+                }
+                else
+                {
+                    last_filename = filename;
+                    last_filename_noext = filename_noext;
+                }
+
+                input_files[i] = inputpath + PATHSTR('/') + filename;
+                output_files[i] = outputpath + PATHSTR('/') + output_filename;
             }
         }
         else if (!path_is_directory(inputpath) && !path_is_directory(outputpath))
@@ -691,6 +741,9 @@ int main(int argc, char** argv)
         sprintf(modelpath, "%s/noise%d_scale2.0x_model.bin", model.c_str(), noise);
     }
 #endif
+
+    path_t paramfullpath = sanitize_filepath(parampath);
+    path_t modelfullpath = sanitize_filepath(modelpath);
 
 #if _WIN32
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
@@ -779,7 +832,7 @@ int main(int argc, char** argv)
         {
             waifu2x[i] = new Waifu2x(gpuid[i], tta_mode);
 
-            waifu2x[i]->load(parampath, modelpath);
+            waifu2x[i]->load(paramfullpath, modelfullpath);
 
             waifu2x[i]->noise = noise;
             waifu2x[i]->scale = scale;
